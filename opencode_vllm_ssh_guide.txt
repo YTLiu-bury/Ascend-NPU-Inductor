@@ -1,0 +1,335 @@
+本地 OpenCode 使用服务器 vLLM / Qwen3.8
+=========================================
+
+目标
+----
+本地电脑运行 OpenCode，模型推理由服务器上的 vLLM + 昇腾 NPU 完成。
+
+链路：
+
+本地 OpenCode
+    |
+    | http://127.0.0.1:18000/v1
+    |
+SSH 隧道
+    |
+    v
+服务器 127.0.0.1:8000/v1
+    |
+    v
+vLLM -> qwen3.8 -> Ascend NPU
+
+
+一、先确认服务器端 vLLM 正常
+----------------------------
+
+在服务器上执行：
+
+curl http://127.0.0.1:8000/v1/models
+
+应该能看到类似：
+
+"id":"qwen3.8"
+
+目前已知模型信息：
+
+模型 ID：qwen3.8
+vLLM 端口：8000
+max_model_len：256000
+
+
+二、在本地电脑建立 SSH 隧道
+--------------------------
+
+注意：下面命令是在“本地电脑”执行，不是在服务器执行。
+
+假设平时登录服务器的命令是：
+
+ssh 用户名@服务器IP
+
+则执行：
+
+ssh -N -L 18000:127.0.0.1:8000 用户名@服务器IP
+
+例如：
+
+ssh -N -L 18000:127.0.0.1:8000 z00824525@10.10.10.123
+
+这个终端窗口保持运行，不要关闭。
+
+含义：
+
+本地 127.0.0.1:18000
+        |
+        | SSH
+        v
+服务器 127.0.0.1:8000
+
+
+如果 SSH 不是默认 22 端口，例如服务器 SSH 端口为 2222：
+
+ssh -p 2222 -N -L 18000:127.0.0.1:8000 用户名@服务器IP
+
+
+三、在本地验证隧道
+------------------
+
+另开一个本地终端，执行：
+
+curl http://127.0.0.1:18000/v1/models
+
+正常情况下应该再次看到：
+
+"id":"qwen3.8"
+
+只要这一步成功，就说明：
+
+本地电脑 -> SSH -> 服务器 vLLM
+
+已经打通。
+
+
+四、配置本地 OpenCode
+---------------------
+
+先查看版本：
+
+opencode --version
+
+
+推荐在你要使用 OpenCode 的项目根目录创建：
+
+opencode.jsonc
+
+内容：
+
+{
+  "$schema": "https://opencode.ai/config.json",
+
+  "model": "ascend/qwen3.8",
+
+  "providers": {
+    "ascend": {
+      "name": "Ascend vLLM",
+
+      "package": "@opencode/ai/providers/openai-compatible",
+
+      "settings": {
+        "baseURL": "http://127.0.0.1:18000/v1"
+      },
+
+      "models": {
+        "qwen3.8": {
+          "modelID": "qwen3.8",
+          "name": "Qwen3.8-27B-W8A8",
+
+          "limit": {
+            "context": 256000,
+            "output": 8192
+          }
+        }
+      }
+    }
+  }
+}
+
+
+说明：
+
+ascend
+    是自定义 provider 名，可以自己改。
+
+qwen3.8
+    必须对应服务器 /v1/models 返回的模型 ID。
+
+baseURL
+    写本地 SSH 隧道地址：
+    http://127.0.0.1:18000/v1
+
+这里不要写服务器真实 IP，也不需要把 8000 端口暴露到公网。
+
+
+五、启动 OpenCode
+-----------------
+
+进入本地源码目录：
+
+cd 你的项目目录
+
+例如：
+
+cd pytorch
+
+然后：
+
+opencode
+
+进入 OpenCode 后，可以先输入：
+
+先不要修改任何文件，分析当前项目目录结构。
+
+如果模型正常响应，再测试：
+
+搜索当前项目中 torch.isin 相关代码，只分析，不修改文件。
+
+
+六、非常重要：OpenCode 操作的是哪里
+-----------------------------------
+
+虽然模型运行在服务器 NPU 上，但 OpenCode 是运行在本地电脑上的。
+
+因此：
+
+模型推理              -> 服务器
+read / grep / edit    -> 本地电脑
+git / python / pytest -> 本地电脑
+文件修改              -> 本地电脑
+
+也就是说，如果源码只存在服务器：
+
+/home/xxx/pytorch
+/home/xxx/torch_npu
+
+那么本地 OpenCode 不能直接看到这些服务器文件。
+
+这种情况下最终更适合：
+
+在自己的服务器开发容器里安装 OpenCode
+        |
+        +-- 直接访问服务器源码
+        +-- 直接运行服务器 Python / pytest / NPU 测试
+        |
+        +-- 调用现有 vLLM 服务
+
+当前本地方案主要适合：
+
+1. 先验证 qwen3.8 能否正常作为 OpenCode 模型使用；
+2. 本地本身有一份源码；
+3. 不想修改现有 vLLM 容器。
+
+
+七、如果 OpenCode 能聊天但不会读文件/执行命令
+--------------------------------------------
+
+这通常不是 SSH 隧道问题，而是 vLLM 的 tool calling 没配置好。
+
+普通聊天 API 可用，不等于 Agent 工具调用一定可用。
+
+如果出现 tool calling / tool_choice 相关错误，需要检查服务器启动 vLLM 时是否启用了类似：
+
+--enable-auto-tool-choice
+
+以及该 Qwen 模型对应的：
+
+--tool-call-parser ...
+
+这个参数不要直接乱改，应该根据当前 vLLM / vllm-ascend 版本和模型 chat template 确定。
+
+
+八、常见问题
+------------
+
+1. 本地执行：
+
+curl http://127.0.0.1:18000/v1/models
+
+提示 Connection refused
+
+先检查 SSH 隧道那个终端是否还开着。
+
+
+2. SSH 隧道建立成功，但请求没有返回模型
+
+先登录服务器，在服务器执行：
+
+curl http://127.0.0.1:8000/v1/models
+
+如果服务器本身也访问不了，说明 vLLM 服务没启动或端口不是 8000。
+
+
+3. vLLM 实际只存在 Docker 容器内部
+
+如果下面命令是在服务器宿主机上访问不到：
+
+curl http://127.0.0.1:8000/v1/models
+
+但进入 vLLM 容器后能访问，那么说明 8000 可能没有映射到宿主机。
+
+需要检查：
+
+docker ps
+
+查看是否有类似：
+
+0.0.0.0:8000->8000/tcp
+
+如果没有端口映射，需要根据实际 Docker 网络调整，不能直接使用上面的 SSH 隧道命令。
+
+
+4. 不建议直接开放服务器 8000 端口到公网
+
+优先使用：
+
+ssh -N -L 18000:127.0.0.1:8000 用户名@服务器IP
+
+这样 vLLM 仍然只需要监听服务器本地地址。
+
+
+九、最短操作版
+--------------
+
+服务器确认：
+
+curl http://127.0.0.1:8000/v1/models
+
+
+本地建立隧道：
+
+ssh -N -L 18000:127.0.0.1:8000 用户名@服务器IP
+
+
+本地另开终端验证：
+
+curl http://127.0.0.1:18000/v1/models
+
+
+项目目录创建 opencode.jsonc：
+
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "ascend/qwen3.8",
+  "providers": {
+    "ascend": {
+      "name": "Ascend vLLM",
+      "package": "@opencode/ai/providers/openai-compatible",
+      "settings": {
+        "baseURL": "http://127.0.0.1:18000/v1"
+      },
+      "models": {
+        "qwen3.8": {
+          "modelID": "qwen3.8",
+          "name": "Qwen3.8-27B-W8A8",
+          "limit": {
+            "context": 256000,
+            "output": 8192
+          }
+        }
+      }
+    }
+  }
+}
+
+
+启动：
+
+opencode
+
+
+备注
+----
+如果你的 OpenCode 版本不识别上面的 providers/package/settings 配置格式，
+先执行：
+
+opencode --version
+
+把版本号和报错贴出来，再按对应版本改成 provider/npm/options 格式。
